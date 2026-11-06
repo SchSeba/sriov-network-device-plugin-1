@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	cdilib "github.com/container-orchestrated-devices/container-device-interface/pkg/cdi"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
@@ -16,6 +17,13 @@ import (
 	"github.com/k8snetworkplumbingwg/sriov-network-device-plugin/pkg/types/mocks"
 	"github.com/k8snetworkplumbingwg/sriov-network-device-plugin/pkg/utils"
 )
+
+func mustNewResourceServer(prefix, suffix string, pluginWatch, useCdi bool, rp types.ResourcePool) types.ResourceServer {
+	GinkgoHelper()
+	rs, err := NewResourceServer(prefix, suffix, pluginWatch, useCdi, rp)
+	Expect(err).NotTo(HaveOccurred())
+	return rs
+}
 
 var _ = Describe("Server", func() {
 	Describe("creating new instance of resource server", func() {
@@ -29,7 +37,7 @@ var _ = Describe("Server", func() {
 			})
 			It("should have the properties correctly assigned when plugin watcher enabled", func() {
 				// Create ResourceServer with plugin watch mode enabled
-				obj := NewResourceServer("fakeprefix", "fakesuffix", true, false, &rp)
+				obj := mustNewResourceServer("fakeprefix", "fakesuffix", true, false, &rp)
 				rs = obj.(*resourceServer)
 				Expect(rs.resourcePool.GetResourceName()).To(Equal("fakename"))
 				Expect(rs.resourceNamePrefix).To(Equal("fakeprefix"))
@@ -39,7 +47,7 @@ var _ = Describe("Server", func() {
 			})
 			It("should have the properties correctly assigned when plugin watcher disabled", func() {
 				// Create ResourceServer with plugin watch mode disabled
-				obj := NewResourceServer("fakeprefix", "fakesuffix", false, false, &rp)
+				obj := mustNewResourceServer("fakeprefix", "fakesuffix", false, false, &rp)
 				rs = obj.(*resourceServer)
 				Expect(rs.resourcePool.GetResourceName()).To(Equal("fakename"))
 				Expect(rs.resourceNamePrefix).To(Equal("fakeprefix"))
@@ -48,6 +56,15 @@ var _ = Describe("Server", func() {
 				Expect(rs.sockPath).To(Equal(filepath.Join(types.DeprecatedSockDir,
 					"fakeprefix_fakename.fakesuffix")))
 			})
+		})
+		It("rejects a socket path outside the plugin directory", func() {
+			rp := mocks.ResourcePool{}
+			rp.On("GetResourceName").Return("fakename")
+
+			obj, err := NewResourceServer("../../../../escape", "fakesuffix", true, false, &rp)
+
+			Expect(err).To(MatchError(ContainSubstring("escapes base directory")))
+			Expect(obj).To(BeNil())
 		})
 	})
 	DescribeTable("registering with Kubelet",
@@ -65,7 +82,7 @@ var _ = Describe("Server", func() {
 			types.SockDir = fs.RootDir
 			types.DeprecatedSockDir = fs.RootDir
 
-			obj := NewResourceServer("fakeprefix", "fakesuffix", shouldEnablePluginWatch, false, &rp)
+			obj := mustNewResourceServer("fakeprefix", "fakesuffix", shouldEnablePluginWatch, false, &rp)
 			rs := obj.(*resourceServer)
 
 			registrationServer := createFakeRegistrationServer(fs.RootDir,
@@ -112,7 +129,7 @@ var _ = Describe("Server", func() {
 				defer fs.Use()()
 				rp := mocks.ResourcePool{}
 				rp.On("GetResourceName").Return("fake.com")
-				rs := NewResourceServer("fakeprefix", "fakesuffix", true, false, &rp).(*resourceServer)
+				rs := mustNewResourceServer("fakeprefix", "fakesuffix", true, false, &rp).(*resourceServer)
 				err = rs.Init()
 			})
 			It("should never fail", func() {
@@ -152,7 +169,7 @@ var _ = Describe("Server", func() {
 					On("CleanDeviceInfoFile", "fake").Return(nil)
 
 				// Create ResourceServer with plugin watch mode disabled
-				rs := NewResourceServer("fake", "fake", false, false, &rp).(*resourceServer)
+				rs := mustNewResourceServer("fake", "fake", false, false, &rp).(*resourceServer)
 
 				registrationServer := createFakeRegistrationServer(fs.RootDir,
 					"fake_fake.com.fake", false, false)
@@ -191,7 +208,7 @@ var _ = Describe("Server", func() {
 					On("Probe").Return(true).
 					On("CleanDeviceInfoFile", "fake").Return(nil)
 				// Create ResourceServer with plugin watch mode enabled
-				rs := NewResourceServer("fake", "fake", true, false, &rp).(*resourceServer)
+				rs := mustNewResourceServer("fake", "fake", true, false, &rp).(*resourceServer)
 
 				registrationServer := createFakeRegistrationServer(fs.RootDir,
 					"fake_fake.com.fake", false, true)
@@ -224,7 +241,7 @@ var _ = Describe("Server", func() {
 					On("CleanDeviceInfoFile", "fake").Return(nil)
 
 				// Create ResourceServer with plugin watch mode disabled
-				rs := NewResourceServer("fake", "fake", false, false, &rp).(*resourceServer)
+				rs := mustNewResourceServer("fake", "fake", false, false, &rp).(*resourceServer)
 
 				registrationServer := createFakeRegistrationServer(fs.RootDir,
 					"fake_fake.com.fake", false, false)
@@ -265,7 +282,7 @@ var _ = Describe("Server", func() {
 				On("StoreDeviceInfoFile", "fake.com", []string{"00:00.01"}).
 				Return(nil)
 
-			rs := NewResourceServer("fake.com", "fake", true, false, &rp).(*resourceServer)
+			rs := mustNewResourceServer("fake.com", "fake", true, false, &rp).(*resourceServer)
 
 			resp, err := rs.Allocate(context.TODO(), req)
 
@@ -293,6 +310,44 @@ var _ = Describe("Server", func() {
 		),
 		Entry("empty AllocateRequest", &pluginapi.AllocateRequest{}, 0, false),
 	)
+	It("preserves CDI devices when allocations from multiple resource pools are merged", func() {
+		annotations := map[string]string{}
+		expectedDevices := []string{
+			"openshift.io/net-pci=0000:31:0b.1",
+			"openshift.io/net-pci=0000:31:0a.4",
+			"openshift.io/net-pci=0000:31:10.1",
+			"other.example.com/net-pci=0000:31:06.0",
+		}
+		pools := []struct {
+			prefix, name string
+			ids          []string
+		}{
+			{"openshift.io", "cnsbc_vfio_int_access", []string{"0000:31:0b.1", "0000:31:0a.4"}},
+			{"openshift.io", "cnsbc_vfio_int_core", []string{"0000:31:10.1"}},
+			{"other.example.com", "cnsbc_vfio_int_access", []string{"0000:31:06.0"}},
+		}
+		for _, pool := range pools {
+			rp := mocks.NewResourcePool(GinkgoT())
+			ids := pool.ids
+			rp.On("GetResourceName").Return(pool.name)
+			rp.On("GetCDIName").Return("net-pci")
+			rp.On("GetEnvs", pool.prefix, ids).Return(map[string]string{}, nil)
+			rp.On("StoreDeviceInfoFile", pool.prefix, ids).Return(nil)
+			rs := mustNewResourceServer(pool.prefix, "fake", true, true, rp).(*resourceServer)
+			resp, err := rs.Allocate(context.Background(), &pluginapi.AllocateRequest{
+				ContainerRequests: []*pluginapi.ContainerAllocateRequest{{DevicesIds: ids}},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.ContainerResponses).To(HaveLen(1))
+			// Kubelet merges the annotation maps from all requested resource pools.
+			for key, value := range resp.ContainerResponses[0].Annotations {
+				annotations[key] = value
+			}
+		}
+		_, devices, err := cdilib.ParseAnnotations(annotations)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(devices).To(ConsistOf(expectedDevices))
+	})
 	DescribeTable("allocating with CDI",
 		func(req *pluginapi.AllocateRequest, expectedRespLength int, shouldFail bool) {
 			rp := mocks.ResourcePool{}
@@ -311,11 +366,11 @@ var _ = Describe("Server", func() {
 				On("StoreDeviceInfoFile", "fake.com", []string{"00:00.01"}).
 				Return(nil)
 
-			rs := NewResourceServer("fake.com", "fake", true, true, &rp).(*resourceServer)
+			rs := mustNewResourceServer("fake.com", "fake", true, true, &rp).(*resourceServer)
 
 			cdi := &CDImocks.CDI{}
 			cdi.On("CreateCDISpecForPool", "fake.com", &rp).Return(nil).Twice().
-				On("CreateContainerAnnotations", []string{"00:00.01"}, "fake.com", "fake.com").
+				On("CreateContainerAnnotations", []string{"00:00.01"}, "fake.com", "fake.com", "fake.com").
 				Return(map[string]string{"00:00.01": "fake.com/net=00:00.01"}, nil)
 			rs.cdi = cdi
 
@@ -370,7 +425,7 @@ var _ = Describe("Server", func() {
 				rp.On("GetResourceName").Return("fake.com").
 					On("GetDevices").Return(map[string]*pluginapi.Device{"00:00.01": {ID: "00:00.01", Health: "Healthy"}}).Once()
 
-				rs := NewResourceServer("fake.com", "fake", true, false, &rp).(*resourceServer)
+				rs := mustNewResourceServer("fake.com", "fake", true, false, &rp).(*resourceServer)
 				rs.sockPath = fs.RootDir
 
 				lwSrv := &fakeListAndWatchServer{
@@ -391,7 +446,7 @@ var _ = Describe("Server", func() {
 					On("GetDevices").Return(map[string]*pluginapi.Device{"00:00.01": {ID: "00:00.01", Health: "Healthy"}}).Once().
 					On("GetDevices").Return(map[string]*pluginapi.Device{"00:00.02": {ID: "00:00.02", Health: "Healthy"}}).Once()
 
-				rs := NewResourceServer("fake.com", "fake", true, false, &rp).(*resourceServer)
+				rs := mustNewResourceServer("fake.com", "fake", true, false, &rp).(*resourceServer)
 				rs.sockPath = fs.RootDir
 
 				lwSrv := &fakeListAndWatchServer{
@@ -425,7 +480,7 @@ var _ = Describe("Server", func() {
 					On("GetDevices").Return(map[string]*pluginapi.Device{"00:00.01": {ID: "00:00.01", Health: "Healthy"}}).Once().
 					On("GetDevices").Return(map[string]*pluginapi.Device{"00:00.02": {ID: "00:00.02", Health: "Healthy"}}).Once()
 
-				rs := NewResourceServer("fake.com", "fake", true, false, &rp).(*resourceServer)
+				rs := mustNewResourceServer("fake.com", "fake", true, false, &rp).(*resourceServer)
 				rs.sockPath = fs.RootDir
 
 				lwSrv := &fakeListAndWatchServer{
@@ -461,7 +516,7 @@ var _ = Describe("Server", func() {
 					On("GetDevices").Return(map[string]*pluginapi.Device{"00:00.01": {ID: "00:00.01", Health: "Healthy"}}).Twice().
 					On("GetResourcePrefix").Return("fake.com").Twice()
 
-				rs := NewResourceServer("fake.com", "fake", true, true, &rp).(*resourceServer)
+				rs := mustNewResourceServer("fake.com", "fake", true, true, &rp).(*resourceServer)
 				rs.sockPath = fs.RootDir
 
 				cdi := &CDImocks.CDI{}
