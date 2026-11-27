@@ -1,8 +1,7 @@
 # `ghw` - Go HardWare discovery/inspection library
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/jaypipes/ghw.svg)](https://pkg.go.dev/github.com/jaypipes/ghw)
-[![Go Report Card](https://goreportcard.com/badge/github.com/jaypipes/ghw)](https://goreportcard.com/report/github.com/jaypipes/ghw)
-[![Build Status](https://github.com/jaypipes/ghw/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/jaypipes/ghw/actions)
+[![Test Status](https://github.com/jaypipes/ghw/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/jaypipes/ghw/actions)
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
 ![ghw mascot](images/ghw-gopher.png)
@@ -301,6 +300,11 @@ Each `ghw.Disk` struct contains the following fields:
 * `ghw.Disk.PhysicalBlockSizeBytes` contains the size of the physical blocks
   used on the disk, in bytes. This is typically the minimum amount of data that
   will be written in a single write operation for the disk.
+* `ghw.Disk.LogicalBlockSizeBytes` (Linux only) contains the size of the
+  logical blocks used on the disk, in bytes. This is the disk's addressable
+  unit size, which may be smaller than `PhysicalBlockSizeBytes`, e.g. for a
+  512e drive that reports a 512-byte logical block size over 4096-byte
+  physical sectors.
 * `ghw.Disk.IsRemovable` contains a boolean indicating if the disk drive is
   removable
 * `ghw.Disk.DriveType` is the type of drive. It is of type `ghw.DriveType`
@@ -661,6 +665,13 @@ information.
 > [github.com/jaypipes/pcidb library](http://github.com/jaypipes/pcidb). You
 > can read that library's README for more information about the various structs
 > that are exposed on the `ghw.PCIInfo` struct.
+
+To use a PCI database you loaded or built yourself instead of the one `ghw`
+loads, pass it with `ghw.WithPCIDB()`:
+
+```go
+pci, err := ghw.PCI(ghw.WithPCIDB(db))
+```
 
 The `ghw.PCI()` function returns a `ghw.PCIInfo` struct that contains
 information about the host computer's PCI devices.
@@ -1164,6 +1175,12 @@ The `ghw.ProductInfo` struct contains multiple fields:
 > **NOTE**: These fields are often missing for non-server hardware. Don't be
 > surprised to see empty string, "Default string" or "None" values.
 
+> **NOTE**: On MacOSX/Darwin, this information comes from the `IOPlatformExpertDevice`
+> node of the I/O Registry and from `system_profiler`, so `ghw.ProductInfo.Name`
+> is the machine model identifier (e.g. `Mac14,7`), `ghw.ProductInfo.Family` the
+> marketing name (e.g. `MacBook Pro`) and `ghw.ProductInfo.SKU` Apple's part
+> number (e.g. `Z1AB0001CLL/A`).
+
 ```go
 package main
 
@@ -1200,6 +1217,89 @@ WARNING: Unable to read product_serial: open /sys/class/dmi/id/product_serial: p
 
 You can ignore them or use the [Disabling warning messages](#disabling-warning-messages)
 feature to quiet things down.
+
+### Watchdog (Linux only)
+
+The `ghw.Watchdog()` function returns a `ghw.WatchdogInfo` struct that
+indicates whether the host system has a hardware watchdog.
+
+The `ghw.WatchdogInfo` struct contains one field:
+
+* `ghw.WatchdogInfo.Present` is a bool indicating whether a hardware watchdog
+  was detected, either as an entry under `/sys/class/watchdog` or as the
+  `/dev/watchdog` character device on older kernels
+
+```go
+package main
+
+import (
+	"fmt"
+
+	"github.com/jaypipes/ghw"
+)
+
+func main() {
+	watchdog, err := ghw.Watchdog()
+	if err != nil {
+		fmt.Printf("Error getting watchdog info: %v", err)
+	}
+
+	fmt.Printf("%v\n", watchdog)
+}
+```
+
+Example output from my personal workstation:
+
+```
+watchdog present: true
+```
+
+### TPM (Linux only)
+
+The `ghw.TPM()` function returns a `ghw.TPMInfo` struct that contains
+information about the Trusted Platform Module(s) (TPM) on the host system.
+
+The `ghw.TPMInfo` struct contains a `Devices` field:
+
+* `ghw.TPMInfo.Devices` is a slice of pointers to `ghw.TPMDevice` structs, one
+  for each TPM detected under `/sys/class/tpm`
+
+Each `ghw.TPMDevice` struct contains multiple fields:
+
+* `ghw.TPMDevice.ManufacturerName` is a string with the human-readable TPM
+  manufacturer short name (e.g. `AMD`, `IFX` for Infineon, `STM` for
+  STMicroelectronics)
+* `ghw.TPMDevice.ManufacturerVendorID` is a string with the 16-bit TCG Vendor
+  ID assigned to the manufacturer, when the host exposes it (e.g. `0x1414`)
+* `ghw.TPMDevice.FirmwareVersion` is a string with the TPM firmware version, if
+  exposed by the driver
+* `ghw.TPMDevice.SpecVersion` is a string with the TCG specification version the
+  TPM implements (e.g. `1.2` or `2.0`)
+
+```go
+package main
+
+import (
+	"fmt"
+
+	"github.com/jaypipes/ghw"
+)
+
+func main() {
+	tpm, err := ghw.TPM()
+	if err != nil {
+		fmt.Printf("Error getting TPM info: %v", err)
+	}
+
+	fmt.Printf("%v\n", tpm)
+}
+```
+
+Example output from my personal workstation:
+
+```
+tpm manufacturer_name=STM manufacturer_vendor_id= firmware_version= spec_version=2.0
+```
 
 ## Advanced Usage
 
@@ -1620,8 +1720,8 @@ external tools when available.
 
 > **WARNING**: on all platforms, disabling external tools make ghw return less
 > data.  Unless noted otherwise, there is _no fallback flow_ if external tools
-> are disabled. On MacOSX/Darwin, disabling external tools disables block
-> support entirely
+> are disabled. On MacOSX/Darwin, disabling external tools disables block and
+> product support entirely
 
 ## Developers
 
