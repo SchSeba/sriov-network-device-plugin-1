@@ -56,11 +56,15 @@ const (
 )
 
 // NewResourceServer returns an instance of ResourceServer
-func NewResourceServer(prefix, suffix string, pluginWatch, useCdi bool, rp types.ResourcePool) types.ResourceServer {
+func NewResourceServer(prefix, suffix string, pluginWatch, useCdi bool, rp types.ResourcePool) (types.ResourceServer, error) {
 	sockName := fmt.Sprintf("%s_%s.%s", prefix, rp.GetResourceName(), suffix)
-	sockPath := filepath.Join(types.SockDir, sockName)
+	baseDir := types.SockDir
 	if !pluginWatch {
-		sockPath = filepath.Join(types.DeprecatedSockDir, sockName)
+		baseDir = types.DeprecatedSockDir
+	}
+	sockPath := filepath.Join(baseDir, sockName)
+	if !strings.HasPrefix(filepath.Clean(sockPath), filepath.Clean(baseDir)+string(filepath.Separator)) {
+		return nil, fmt.Errorf("computed socket path %q escapes base directory %q", sockPath, baseDir)
 	}
 
 	//nolint:mnd
@@ -77,7 +81,7 @@ func NewResourceServer(prefix, suffix string, pluginWatch, useCdi bool, rp types
 		stopWatcher:        make(chan bool),
 		checkIntervals:     20, // updates every 20 seconds
 		cdi:                cdiPkg.New(),
-	}
+	}, nil
 }
 
 func (rs *resourceServer) register() error {
@@ -140,7 +144,7 @@ func (rs *resourceServer) Allocate(ctx context.Context, rqt *pluginapi.AllocateR
 
 		if rs.useCdi {
 			containerResp.Annotations, err = rs.cdi.CreateContainerAnnotations(
-				container.DevicesIds, rs.resourceNamePrefix, rs.resourcePool.GetCDIName())
+				container.DevicesIds, rs.resourceNamePrefix, rs.resourcePool.GetCDIName(), rs.resourcePool.GetResourceName())
 			if err != nil {
 				return nil, fmt.Errorf("can't create container annotation: %s", err)
 			}
@@ -166,9 +170,10 @@ func (rs *resourceServer) ListAndWatch(empty *pluginapi.Empty, stream pluginapi.
 	methodID := fmt.Sprintf("ListAndWatch(%s)", rs.resourcePool.GetResourceName()) // for logging purpose
 	glog.Infof("%s invoked", methodID)
 	// Send initial list of devices
-	devs := make([]*pluginapi.Device, 0)
+	poolDevs := rs.resourcePool.GetDevices()
+	devs := make([]*pluginapi.Device, 0, len(poolDevs))
 	resp := new(pluginapi.ListAndWatchResponse)
-	for _, dev := range rs.resourcePool.GetDevices() {
+	for _, dev := range poolDevs {
 		devs = append(devs, dev)
 	}
 	resp.Devices = devs
